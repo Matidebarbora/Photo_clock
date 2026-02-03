@@ -1,25 +1,55 @@
-// Include configuration FIRST, before any other includes
+// Include CYD configuration FIRST, before any other includes
 #include "CYD_Config.h"
 
-#include <TFT_eSPI.h>
 #include <SPI.h>
+#include <TFT_eSPI.h>
+#include <XPT2046_Touchscreen.h>
 #include <SD.h>
 #include <TJpg_Decoder.h>
 
 TFT_eSPI tft = TFT_eSPI();
 
-// SD card pins for ESP32-2432S028
+// Touchscreen pins
+#define XPT2046_IRQ 36
+#define XPT2046_MOSI 32
+#define XPT2046_MISO 39
+#define XPT2046_CLK 25
+#define XPT2046_CS 33
+
+SPIClass touchscreenSPI = SPIClass(VSPI);
+XPT2046_Touchscreen touchscreen(XPT2046_CS, XPT2046_IRQ);
+
+// SD card
 #define SD_CS 5
-#define SD_MOSI 23
-#define SD_MISO 19
-#define SD_SCK 18
+
+// UI
+const int FOOTER_HEIGHT = 40;
+const int SCREEN_WIDTH = 320;
+const int SCREEN_HEIGHT = 240;
 
 // Slideshow settings
-const int slideDelay = 3000;  // 3 seconds per image
-const int fadeSteps = 20;     // Number of steps in fade transition (higher = smoother but slower)
-const int fadeDelay = 30;     // Delay between fade steps in ms
+const int slideDelay = 30000;
+const int fadeSteps = 20;
+const int fadeDelay = 30;
 
-File root;
+// Time variables
+int currentHour = 12;
+int currentMinute = 0;
+int currentSecond = 0;
+unsigned long lastMillis = 0;
+
+// State control
+enum ProgramState {
+  TIME_SETTING,
+  SLIDESHOW
+};
+
+ProgramState currentState = TIME_SETTING;
+
+// Image storage
+String imageFiles[50];
+int imageFileCount = 0;
+int currentImageIndex = 0;
 
 bool tft_output(int16_t x, int16_t y, uint16_t w, uint16_t h, uint16_t* bitmap) {
   if (y >= tft.height()) return 0;
@@ -27,250 +57,376 @@ bool tft_output(int16_t x, int16_t y, uint16_t w, uint16_t h, uint16_t* bitmap) 
   return 1;
 }
 
-// Fade out to black
 void fadeOut() {
   for (int brightness = 255; brightness >= 0; brightness -= (255 / fadeSteps)) {
-    // Adjust backlight brightness
-    int pwmValue = max(0, brightness);
-    ledcWrite(0, pwmValue);
+    analogWrite(21, brightness);
     delay(fadeDelay);
   }
-  ledcWrite(0, 0);  // Ensure it's fully off
+  analogWrite(21, 0);
 }
 
-// Fade in from black
 void fadeIn() {
   for (int brightness = 0; brightness <= 255; brightness += (255 / fadeSteps)) {
-    // Adjust backlight brightness
-    int pwmValue = min(255, brightness);
-    ledcWrite(0, pwmValue);
+    analogWrite(21, brightness);
     delay(fadeDelay);
   }
-  ledcWrite(0, 255);  // Ensure it's fully on
+  analogWrite(21, 255);
+}
+
+void updateTime() {
+  unsigned long currentMillis = millis();
+  if (currentMillis - lastMillis >= 1000) {
+    lastMillis = currentMillis;
+    currentSecond++;
+    if (currentSecond >= 60) {
+      currentSecond = 0;
+      currentMinute++;
+      if (currentMinute >= 60) {
+        currentMinute = 0;
+        currentHour++;
+        if (currentHour >= 24) {
+          currentHour = 0;
+        }
+      }
+    }
+  }
+}
+
+void drawFooter() {
+  tft.fillRect(0, SCREEN_HEIGHT - FOOTER_HEIGHT, SCREEN_WIDTH, FOOTER_HEIGHT, TFT_DARKGREY);
+  tft.setTextColor(TFT_WHITE, TFT_DARKGREY);
+  tft.setTextSize(3);
+  
+  char timeStr[9];
+  sprintf(timeStr, "%02d:%02d:%02d", currentHour, currentMinute, currentSecond);
+  
+  int textWidth = strlen(timeStr) * 18;
+  int xPos = (SCREEN_WIDTH - textWidth) / 2;
+  
+  tft.setCursor(xPos, SCREEN_HEIGHT - FOOTER_HEIGHT + 8);
+  tft.print(timeStr);
+}
+
+void drawTimeSettingScreen() {
+  tft.fillScreen(TFT_BLACK);
+  
+  tft.setTextColor(TFT_WHITE, TFT_BLACK);
+  tft.setTextSize(2);
+  tft.setCursor(90, 10);
+  tft.print("SET TIME");
+  
+  tft.setTextSize(4);
+  char timeStr[9];
+  sprintf(timeStr, "%02d:%02d:%02d", currentHour, currentMinute, currentSecond);
+  tft.setCursor(40, 50);
+  tft.print(timeStr);
+  
+  // Hour buttons
+  tft.fillRect(20, 110, 60, 40, TFT_GREEN);
+  tft.fillRect(20, 160, 60, 40, TFT_RED);
+  tft.setTextColor(TFT_BLACK);
+  tft.setTextSize(3);
+  tft.setCursor(40, 120);
+  tft.print("+");
+  tft.setCursor(40, 170);
+  tft.print("-");
+  
+  // Minute buttons
+  tft.fillRect(130, 110, 60, 40, TFT_GREEN);
+  tft.fillRect(130, 160, 60, 40, TFT_RED);
+  tft.setCursor(150, 120);
+  tft.print("+");
+  tft.setCursor(150, 170);
+  tft.print("-");
+  
+  // Second buttons
+  tft.fillRect(240, 110, 60, 40, TFT_GREEN);
+  tft.fillRect(240, 160, 60, 40, TFT_RED);
+  tft.setCursor(260, 120);
+  tft.print("+");
+  tft.setCursor(260, 170);
+  tft.print("-");
+  
+  // Labels
+  tft.setTextSize(1);
+  tft.setTextColor(TFT_WHITE);
+  tft.setCursor(35, 100);
+  tft.print("Hour");
+  tft.setCursor(140, 100);
+  tft.print("Min");
+  tft.setCursor(255, 100);
+  tft.print("Sec");
+  
+  // Done button
+  tft.fillRect(110, 210, 100, 25, TFT_BLUE);
+  tft.setTextColor(TFT_WHITE);
+  tft.setTextSize(2);
+  tft.setCursor(135, 215);
+  tft.print("DONE");
+}
+
+void handleTimeSettingTouch(int x, int y) {
+  // Hour +
+  if (x >= 20 && x <= 80 && y >= 110 && y <= 150) {
+    currentHour = (currentHour + 1) % 24;
+    drawTimeSettingScreen();
+    delay(200);
+  }
+  // Hour -
+  else if (x >= 20 && x <= 80 && y >= 160 && y <= 200) {
+    currentHour = (currentHour - 1 + 24) % 24;
+    drawTimeSettingScreen();
+    delay(200);
+  }
+  // Minute +
+  else if (x >= 130 && x <= 190 && y >= 110 && y <= 150) {
+    currentMinute = (currentMinute + 1) % 60;
+    drawTimeSettingScreen();
+    delay(200);
+  }
+  // Minute -
+  else if (x >= 130 && x <= 190 && y >= 160 && y <= 200) {
+    currentMinute = (currentMinute - 1 + 60) % 60;
+    drawTimeSettingScreen();
+    delay(200);
+  }
+  // Second +
+  else if (x >= 240 && x <= 300 && y >= 110 && y <= 150) {
+    currentSecond = (currentSecond + 1) % 60;
+    drawTimeSettingScreen();
+    delay(200);
+  }
+  // Second -
+  else if (x >= 240 && x <= 300 && y >= 160 && y <= 200) {
+    currentSecond = (currentSecond - 1 + 60) % 60;
+    drawTimeSettingScreen();
+    delay(200);
+  }
+  // Done button - CRITICAL: Start slideshow mode
+  else if (x >= 110 && x <= 210 && y >= 210 && y <= 235) {
+    Serial.println("\n=== TIME SET - STARTING SLIDESHOW MODE ===");
+    
+    // Show transition message
+    tft.fillScreen(TFT_BLACK);
+    tft.setTextColor(TFT_YELLOW, TFT_BLACK);
+    tft.setTextSize(2);
+    tft.setCursor(30, 80);
+    tft.println("Initializing...");
+    tft.setTextSize(1);
+    tft.setCursor(30, 110);
+    tft.println("Disabling touchscreen");
+    tft.setCursor(30, 125);
+    tft.println("Starting SD card");
+    delay(1000);
+    
+    // DISABLE TOUCHSCREEN FOREVER
+    touchscreenSPI.end();
+    Serial.println("✗ Touchscreen disabled");
+    
+    // INITIALIZE SD CARD
+    Serial.println("Initializing SD card...");
+    pinMode(SD_CS, OUTPUT);
+    digitalWrite(SD_CS, HIGH);
+    digitalWrite(XPT2046_CS, HIGH); // Keep touch CS high
+    
+    if (!SD.begin(SD_CS)) {
+      Serial.println("✗ SD Card FAILED!");
+      tft.fillScreen(TFT_RED);
+      tft.setTextColor(TFT_WHITE, TFT_RED);
+      tft.setTextSize(2);
+      tft.setCursor(10, 80);
+      tft.println("SD FAILED!");
+      tft.setTextSize(1);
+      tft.setCursor(10, 110);
+      tft.println("Insert SD card");
+      tft.setCursor(10, 125);
+      tft.println("and reset device");
+      while(1) delay(1000);
+    }
+    
+    Serial.println("✓ SD Card initialized");
+    
+    // Scan for images
+    tft.fillScreen(TFT_BLACK);
+    tft.setTextColor(TFT_WHITE, TFT_BLACK);
+    tft.setTextSize(2);
+    tft.setCursor(30, 100);
+    tft.println("Scanning images...");
+    
+    scanSDCard();
+    
+    // Initialize JPEG decoder
+    TJpgDec.setJpgScale(1);
+    TJpgDec.setSwapBytes(true);
+    TJpgDec.setCallback(tft_output);
+    Serial.println("✓ JPEG decoder ready");
+    
+    // Show ready message
+    tft.fillScreen(TFT_BLACK);
+    tft.setTextColor(TFT_GREEN, TFT_BLACK);
+    tft.setTextSize(2);
+    tft.setCursor(30, 80);
+    tft.println("Ready!");
+    tft.setTextSize(1);
+    tft.setCursor(30, 110);
+    tft.print("Images found: ");
+    tft.println(imageFileCount);
+    delay(2000);
+    
+    // Switch to slideshow mode
+    currentState = SLIDESHOW;
+    lastMillis = millis();
+    
+    tft.fillScreen(TFT_BLACK);
+    Serial.println("✓ Slideshow started!\n");
+    
+    delay(200);
+  }
+}
+
+void displayImage(String filename) {
+  String fullPath = "/" + filename;
+  tft.fillRect(0, 0, SCREEN_WIDTH, SCREEN_HEIGHT - FOOTER_HEIGHT, TFT_BLACK);
+  TJpgDec.drawSdJpg(0, 0, fullPath);
+}
+
+void scanSDCard() {
+  Serial.println("Scanning SD card...");
+  File root = SD.open("/");
+  if (!root) {
+    Serial.println("Failed to open root");
+    return;
+  }
+  
+  imageFileCount = 0;
+  while (imageFileCount < 50) {
+    File entry = root.openNextFile();
+    if (!entry) break;
+    
+    if (!entry.isDirectory()) {
+      String filename = String(entry.name());
+      String filenameLower = filename;
+      filenameLower.toLowerCase();
+      
+      if (filenameLower.endsWith(".jpg") || filenameLower.endsWith(".jpeg")) {
+        imageFiles[imageFileCount] = filename;
+        Serial.print("  ");
+        Serial.print(imageFileCount + 1);
+        Serial.print(". ");
+        Serial.println(filename);
+        imageFileCount++;
+      }
+    }
+    entry.close();
+  }
+  root.close();
+  
+  Serial.print("Found ");
+  Serial.print(imageFileCount);
+  Serial.println(" JPEG files");
 }
 
 void setup() {
   Serial.begin(115200);
   delay(1000);
   
-  // Setup PWM for backlight control (compatible with ESP32 core 3.x)
-  pinMode(TFT_BL, OUTPUT);
-  ledcAttach(TFT_BL, 5000, 8);  // Pin, frequency (5kHz), resolution (8-bit)
-  ledcWrite(0, 255);  // Start at full brightness
+  Serial.println("\n=== Photo Display with Touch Setup ===");
+  Serial.println("Phase 1: Time Setting Mode");
   
-  Serial.println("\n\n=== ESP32-2432S028 Photo Display ===");
-  Serial.println("Starting setup...");
+  // Setup pins
+  pinMode(21, OUTPUT);
+  analogWrite(21, 255);
+  
+  pinMode(XPT2046_CS, OUTPUT);
+  digitalWrite(XPT2046_CS, HIGH);
   
   // Initialize display
-  Serial.println("Step 1: Initializing TFT display...");
   tft.init();
-  Serial.println("  - TFT init complete");
-  
-  tft.setRotation(1);  // Landscape
-  Serial.println("  - Rotation set to 1 (landscape)");
-  
-  // Color test
-  Serial.println("  - Running color test...");
-  tft.fillScreen(TFT_RED);
-  delay(500);
-  tft.fillScreen(TFT_GREEN);
-  delay(500);
-  tft.fillScreen(TFT_BLUE);
-  delay(500);
+  tft.setRotation(1);
   tft.fillScreen(TFT_BLACK);
-  Serial.println("  - Color test complete!");
+  Serial.println("✓ Display initialized");
   
-  // Display text
-  tft.setTextColor(TFT_WHITE, TFT_BLACK);
+  // Initialize touchscreen for time setting
+  touchscreenSPI.begin(XPT2046_CLK, XPT2046_MISO, XPT2046_MOSI, XPT2046_CS);
+  touchscreen.begin(touchscreenSPI);
+  touchscreen.setRotation(1);
+  Serial.println("✓ Touchscreen initialized");
+  
+  // Show welcome and instructions
+  tft.setTextColor(TFT_CYAN, TFT_BLACK);
   tft.setTextSize(2);
-  tft.setCursor(10, 60);
-  tft.println("Display OK!");
-  tft.setCursor(10, 90);
-  tft.println("Check Serial");
-  Serial.println("  - Text displayed on screen");
+  tft.setCursor(50, 60);
+  tft.println("Welcome!");
+  tft.setTextSize(1);
+  tft.setCursor(20, 100);
+  tft.println("Set the time, then press DONE");
+  tft.setCursor(20, 115);
+  tft.println("to start the photo slideshow");
   
-  // Initialize JPEG decoder
-  Serial.println("\nStep 2: Initializing JPEG decoder...");
-  TJpgDec.setJpgScale(1);
-  TJpgDec.setSwapBytes(true);
-  TJpgDec.setCallback(tft_output);
-  Serial.println("  - JPEG decoder ready");
+  delay(5000);
   
-  // Initialize SD card
-  Serial.println("\nStep 3: Initializing SD card...");
-  tft.setCursor(10, 120);
-  tft.println("Init SD...");
+  // Show time setting screen
+  drawTimeSettingScreen();
   
-  if (!SD.begin(SD_CS)) {
-    Serial.println("  - ERROR: SD Card initialization failed!");
-    tft.fillScreen(TFT_RED);
-    tft.setCursor(10, 100);
-    tft.setTextColor(TFT_WHITE, TFT_RED);
-    tft.println("SD FAILED!");
-    while (1) {
-      delay(1000);
-    }
-  }
+  Serial.println("\n>> Set the time and press DONE");
+  Serial.println(">> Touch will be disabled after DONE");
+  Serial.println(">> Slideshow will start automatically\n");
   
-  Serial.println("  - SD Card initialized successfully!");
-  
-  uint64_t cardSize = SD.cardSize() / (1024 * 1024);
-  Serial.print("  - SD Card Size: ");
-  Serial.print(cardSize);
-  Serial.println(" MB");
-  
-  tft.fillScreen(TFT_BLACK);
-  tft.setCursor(10, 60);
-  tft.setTextColor(TFT_GREEN, TFT_BLACK);
-  tft.println("SD Card OK!");
-  tft.setCursor(10, 90);
-  tft.print("Size: ");
-  tft.print(cardSize);
-  tft.println(" MB");
-  
-  // List files
-  Serial.println("\nStep 4: Listing files on SD card...");
-  root = SD.open("/");
-  if (!root) {
-    Serial.println("  - ERROR: Failed to open root directory");
-  } else {
-    Serial.println("  - Files found:");
-    int fileCount = 0;
-    int jpegCount = 0;
-    
-    while (true) {
-      File entry = root.openNextFile();
-      if (!entry) break;
-      
-      if (!entry.isDirectory()) {
-        fileCount++;
-        String filename = String(entry.name());
-        Serial.print("    ");
-        Serial.print(fileCount);
-        Serial.print(". ");
-        Serial.print(filename);
-        Serial.print(" (");
-        Serial.print(entry.size());
-        Serial.println(" bytes)");
-        
-        String filenameLower = filename;
-        filenameLower.toLowerCase();
-        if (filenameLower.indexOf(".jpg") >= 0 || filenameLower.indexOf(".jpeg") >= 0) {
-          jpegCount++;
-        }
-      }
-      entry.close();
-    }
-    root.close();
-    
-    Serial.print("  - Total files: ");
-    Serial.println(fileCount);
-    Serial.print("  - JPEG files: ");
-    Serial.println(jpegCount);
-    
-    tft.setCursor(10, 120);
-    tft.print("JPEGs: ");
-    tft.println(jpegCount);
-  }
-  
-  delay(3000);
-  Serial.println("\n=== Setup Complete ===");
-  Serial.println("Starting slideshow...\n");
-  
-  // Fade out the setup screen
-  fadeOut();
-  tft.fillScreen(TFT_BLACK);
-  fadeIn();
-}
-
-void displayImage(const char* filename) {
-  Serial.print("Loading image: ");
-  Serial.println(filename);
-  
-  // Create full path with leading slash
-  String fullPath = "/";
-  fullPath += filename;
-  
-  // Draw the image using full path
-  uint16_t result = TJpgDec.drawSdJpg(0, 0, fullPath);
-  
-  if (result == 0) {
-    Serial.println("  - Image displayed successfully");
-  } else {
-    Serial.print("  - ERROR: Failed to display image. Error code: ");
-    Serial.println(result);
-  }
+  lastMillis = millis();
 }
 
 void loop() {
-  Serial.println("\n--- Starting new slideshow cycle ---");
-  
-  root = SD.open("/");
-  
-  if (!root) {
-    Serial.println("ERROR: Failed to open root directory");
-    tft.fillScreen(TFT_RED);
-    tft.setTextSize(2);
-    tft.setCursor(10, 100);
-    tft.setTextColor(TFT_WHITE, TFT_RED);
-    tft.println("Error reading SD");
-    delay(5000);
-    return;
-  }
-  
-  int imageNumber = 0;
-  
-  while (true) {
-    File entry = root.openNextFile();
-    
-    if (!entry) {
-      Serial.println("--- End of files, restarting slideshow ---");
-      root.close();
-      break;
-    }
-    
-    if (!entry.isDirectory()) {
-      String filename = entry.name();
-      String filenameLower = filename;
-      filenameLower.toLowerCase();
+  if (currentState == TIME_SETTING) {
+    // TIME SETTING MODE - Touch is active
+    if (touchscreen.tirqTouched() && touchscreen.touched()) {
+      TS_Point p = touchscreen.getPoint();
+      int x = map(p.x, 200, 3700, 1, SCREEN_WIDTH);
+      int y = map(p.y, 240, 3800, 1, SCREEN_HEIGHT);
       
-      if (filenameLower.indexOf(".jpg") >= 0 || filenameLower.indexOf(".jpeg") >= 0) {
-        imageNumber++;
-        Serial.print("\nImage #");
-        Serial.print(imageNumber);
+      handleTimeSettingTouch(x, y);
+      delay(100);
+    }
+  } 
+  else if (currentState == SLIDESHOW) {
+    // SLIDESHOW MODE - Touch is disabled, SD card active
+    updateTime();
+    drawFooter();
+    
+    if (imageFileCount > 0) {
+      static unsigned long lastImageChange = 0;
+      static bool firstRun = true;
+      
+      if (firstRun || millis() - lastImageChange >= slideDelay) {
+        firstRun = false;
+        lastImageChange = millis();
+        
+        Serial.print("Image ");
+        Serial.print(currentImageIndex + 1);
+        Serial.print("/");
+        Serial.print(imageFileCount);
         Serial.print(": ");
+        Serial.println(imageFiles[currentImageIndex]);
         
-        // Fade out current image
         fadeOut();
-        
-        // Load new image while screen is dark
-        tft.fillScreen(TFT_BLACK);
-        displayImage(entry.name());
-        
-        // Fade in new image
+        displayImage(imageFiles[currentImageIndex]);
+        drawFooter();
         fadeIn();
         
-        Serial.print("Displaying for ");
-        Serial.print(slideDelay / 1000);
-        Serial.println(" seconds...");
-        delay(slideDelay);
+        currentImageIndex = (currentImageIndex + 1) % imageFileCount;
+      }
+    } else {
+      // No images found
+      static bool errorShown = false;
+      if (!errorShown) {
+        tft.fillRect(0, 0, SCREEN_WIDTH, SCREEN_HEIGHT - FOOTER_HEIGHT, TFT_YELLOW);
+        tft.setTextSize(2);
+        tft.setTextColor(TFT_BLACK, TFT_YELLOW);
+        tft.setCursor(20, 80);
+        tft.println("No JPEGs!");
+        errorShown = true;
       }
     }
     
-    entry.close();
-  }
-  
-  if (imageNumber == 0) {
-    Serial.println("\nWARNING: No JPEG files found on SD card!");
-    tft.fillScreen(TFT_YELLOW);
-    tft.setTextSize(2);
-    tft.setTextColor(TFT_BLACK, TFT_YELLOW);
-    tft.setCursor(20, 100);
-    tft.println("No JPEGs found!");
-    tft.setCursor(20, 130);
-    tft.println("Add .jpg files");
-    tft.setCursor(20, 160);
-    tft.println("to SD card root");
-    delay(5000);
+    delay(100);
   }
 }
