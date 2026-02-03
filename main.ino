@@ -30,13 +30,13 @@ const int SCREEN_HEIGHT = 240;
 // Slideshow settings
 const int slideDelay = 30000;
 const int fadeSteps = 20;
-const int fadeDelay = 30;
+const int fadeDelay = 15;
 
 // Time variables
 int currentHour = 12;
 int currentMinute = 0;
 int currentSecond = 0;
-unsigned long lastMillis = 0;
+unsigned long lastSecondUpdate = 0;
 
 // State control
 enum ProgramState {
@@ -51,32 +51,22 @@ String imageFiles[50];
 int imageFileCount = 0;
 int currentImageIndex = 0;
 
+// Footer update tracking
+int lastDisplayedSecond = -1;
+
 bool tft_output(int16_t x, int16_t y, uint16_t w, uint16_t h, uint16_t* bitmap) {
   if (y >= tft.height()) return 0;
   tft.pushImage(x, y, w, h, bitmap);
   return 1;
 }
 
-void fadeOut() {
-  for (int brightness = 255; brightness >= 0; brightness -= (255 / fadeSteps)) {
-    analogWrite(21, brightness);
-    delay(fadeDelay);
-  }
-  analogWrite(21, 0);
-}
-
-void fadeIn() {
-  for (int brightness = 0; brightness <= 255; brightness += (255 / fadeSteps)) {
-    analogWrite(21, brightness);
-    delay(fadeDelay);
-  }
-  analogWrite(21, 255);
-}
-
 void updateTime() {
   unsigned long currentMillis = millis();
-  if (currentMillis - lastMillis >= 1000) {
-    lastMillis = currentMillis;
+  
+  // Update time every 1000ms exactly
+  if (currentMillis - lastSecondUpdate >= 1000) {
+    lastSecondUpdate = currentMillis;
+    
     currentSecond++;
     if (currentSecond >= 60) {
       currentSecond = 0;
@@ -93,18 +83,53 @@ void updateTime() {
 }
 
 void drawFooter() {
-  tft.fillRect(0, SCREEN_HEIGHT - FOOTER_HEIGHT, SCREEN_WIDTH, FOOTER_HEIGHT, TFT_DARKGREY);
-  tft.setTextColor(TFT_WHITE, TFT_DARKGREY);
-  tft.setTextSize(3);
-  
-  char timeStr[9];
-  sprintf(timeStr, "%02d:%02d:%02d", currentHour, currentMinute, currentSecond);
-  
-  int textWidth = strlen(timeStr) * 18;
-  int xPos = (SCREEN_WIDTH - textWidth) / 2;
-  
-  tft.setCursor(xPos, SCREEN_HEIGHT - FOOTER_HEIGHT + 8);
-  tft.print(timeStr);
+  // Only redraw footer if second has changed
+  if (lastDisplayedSecond != currentSecond) {
+    lastDisplayedSecond = currentSecond;
+    
+    tft.fillRect(0, SCREEN_HEIGHT - FOOTER_HEIGHT, SCREEN_WIDTH, FOOTER_HEIGHT, TFT_DARKGREY);
+    tft.setTextColor(TFT_WHITE, TFT_DARKGREY);
+    tft.setTextSize(3);
+    
+    char timeStr[9];
+    sprintf(timeStr, "%02d:%02d:%02d", currentHour, currentMinute, currentSecond);
+    
+    int textWidth = strlen(timeStr) * 18;
+    int xPos = (SCREEN_WIDTH - textWidth) / 2;
+    
+    tft.setCursor(xPos, SCREEN_HEIGHT - FOOTER_HEIGHT + 8);
+    tft.print(timeStr);
+  }
+}
+
+// Non-blocking fade out - updates time while fading
+void fadeOut() {
+  for (int brightness = 255; brightness >= 0; brightness -= (255 / fadeSteps)) {
+    analogWrite(21, brightness);
+    
+    // Update time during fade
+    unsigned long fadeStart = millis();
+    while (millis() - fadeStart < fadeDelay) {
+      updateTime();
+      delay(1); // Small delay to prevent CPU hogging
+    }
+  }
+  analogWrite(21, 0);
+}
+
+// Non-blocking fade in - updates time while fading
+void fadeIn() {
+  for (int brightness = 0; brightness <= 255; brightness += (255 / fadeSteps)) {
+    analogWrite(21, brightness);
+    
+    // Update time during fade
+    unsigned long fadeStart = millis();
+    while (millis() - fadeStart < fadeDelay) {
+      updateTime();
+      delay(1); // Small delay to prevent CPU hogging
+    }
+  }
+  analogWrite(21, 255);
 }
 
 void drawTimeSettingScreen() {
@@ -170,37 +195,37 @@ void handleTimeSettingTouch(int x, int y) {
   if (x >= 20 && x <= 80 && y >= 110 && y <= 150) {
     currentHour = (currentHour + 1) % 24;
     drawTimeSettingScreen();
-    delay(200);
+    delay(150);
   }
   // Hour -
   else if (x >= 20 && x <= 80 && y >= 160 && y <= 200) {
     currentHour = (currentHour - 1 + 24) % 24;
     drawTimeSettingScreen();
-    delay(200);
+    delay(150);
   }
   // Minute +
   else if (x >= 130 && x <= 190 && y >= 110 && y <= 150) {
     currentMinute = (currentMinute + 1) % 60;
     drawTimeSettingScreen();
-    delay(200);
+    delay(150);
   }
   // Minute -
   else if (x >= 130 && x <= 190 && y >= 160 && y <= 200) {
     currentMinute = (currentMinute - 1 + 60) % 60;
     drawTimeSettingScreen();
-    delay(200);
+    delay(150);
   }
   // Second +
   else if (x >= 240 && x <= 300 && y >= 110 && y <= 150) {
     currentSecond = (currentSecond + 1) % 60;
     drawTimeSettingScreen();
-    delay(200);
+    delay(150);
   }
   // Second -
   else if (x >= 240 && x <= 300 && y >= 160 && y <= 200) {
     currentSecond = (currentSecond - 1 + 60) % 60;
     drawTimeSettingScreen();
-    delay(200);
+    delay(150);
   }
   // Done button - CRITICAL: Start slideshow mode
   else if (x >= 110 && x <= 210 && y >= 210 && y <= 235) {
@@ -227,7 +252,7 @@ void handleTimeSettingTouch(int x, int y) {
     Serial.println("Initializing SD card...");
     pinMode(SD_CS, OUTPUT);
     digitalWrite(SD_CS, HIGH);
-    digitalWrite(XPT2046_CS, HIGH); // Keep touch CS high
+    digitalWrite(XPT2046_CS, HIGH);
     
     if (!SD.begin(SD_CS)) {
       Serial.println("✗ SD Card FAILED!");
@@ -275,12 +300,12 @@ void handleTimeSettingTouch(int x, int y) {
     
     // Switch to slideshow mode
     currentState = SLIDESHOW;
-    lastMillis = millis();
+    lastSecondUpdate = millis();
     
     tft.fillScreen(TFT_BLACK);
     Serial.println("✓ Slideshow started!\n");
     
-    delay(200);
+    delay(100);
   }
 }
 
@@ -363,7 +388,7 @@ void setup() {
   tft.setCursor(20, 115);
   tft.println("to start the photo slideshow");
   
-  delay(5000);
+  delay(3000);
   
   // Show time setting screen
   drawTimeSettingScreen();
@@ -372,7 +397,7 @@ void setup() {
   Serial.println(">> Touch will be disabled after DONE");
   Serial.println(">> Slideshow will start automatically\n");
   
-  lastMillis = millis();
+  lastSecondUpdate = millis();
 }
 
 void loop() {
@@ -384,12 +409,15 @@ void loop() {
       int y = map(p.y, 240, 3800, 1, SCREEN_HEIGHT);
       
       handleTimeSettingTouch(x, y);
-      delay(100);
     }
   } 
   else if (currentState == SLIDESHOW) {
     // SLIDESHOW MODE - Touch is disabled, SD card active
+    
+    // Update time continuously
     updateTime();
+    
+    // Only redraw footer when second changes
     drawFooter();
     
     if (imageFileCount > 0) {
@@ -407,6 +435,7 @@ void loop() {
         Serial.print(": ");
         Serial.println(imageFiles[currentImageIndex]);
         
+        // Fades now update time internally
         fadeOut();
         displayImage(imageFiles[currentImageIndex]);
         drawFooter();
@@ -426,7 +455,5 @@ void loop() {
         errorShown = true;
       }
     }
-    
-    delay(100);
   }
 }
